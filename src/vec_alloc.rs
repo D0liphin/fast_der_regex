@@ -1,7 +1,7 @@
 use std::alloc::{Allocator, Global, Layout};
-use std::mem::{transmute, MaybeUninit};
+use std::mem::transmute;
 use std::ptr::NonNull;
-use std::{fmt, ptr, slice};
+use std::{fmt, ptr};
 
 struct RawBuf<T> {
     data: NonNull<[T]>,
@@ -17,6 +17,23 @@ impl<T> Drop for RawBuf<T> {
                 Self::new_layout(self.data.len()).0,
             )
         }
+    }
+}
+
+impl<T> fmt::Debug for RawBuf<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        #[derive(Debug)]
+        struct RawBuf {
+            ptr: *const (),
+            capacity: usize,
+        }
+
+        let raw_buf = RawBuf {
+            ptr: self.data.as_non_null_ptr().as_ptr() as *const (),
+            capacity: self.data.len(),
+        };
+
+        write!(f, "{:?}", raw_buf)
     }
 }
 
@@ -74,7 +91,7 @@ pub struct VecAlloc<T> {
 
 impl<T> fmt::Debug for VecAlloc<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "VecAlloc")
+        write!(f, "VecAlloc {{ buf: {:?}, len: {} }}", self.buf, self.len)
     }
 }
 
@@ -121,9 +138,14 @@ impl<T> VecAlloc<T> {
         self.buf.data.len()
     }
 
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
     pub fn resize(&mut self) {
-        println!("resized!");
+        println!("resizing {self:?}");
         self.buf = RawBuf::new(self.capacity() * 2);
+        self.len = 0;
     }
 
     pub fn resized(&mut self) -> &mut Self {
