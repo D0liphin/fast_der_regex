@@ -169,7 +169,7 @@ fn try_alloc(alloc: &mut VecAlloc<Re>, value: Re) -> Result<Const<Re>, ()> {
 }
 
 impl<'a> Regex<'a> {
-    pub const DEFAULT_CAPACITY: usize = 8;
+    pub const DEFAULT_CAPACITY: usize = 32;
 
     /// SAFETY: not unsafe, but marked as unsafe since `tree` must be owned by `alloc` for most
     /// methods to be sound.
@@ -177,7 +177,7 @@ impl<'a> Regex<'a> {
         Self {
             tree,
             alloc,
-            phantom: PhantomData::default(),
+            phantom: PhantomData,
         }
     }
 
@@ -213,7 +213,7 @@ impl<'a> Regex<'a> {
         unsafe { self.tree.as_ref() }.nullable()
     }
 
-    /// Copies `r` into `alloc`. 
+    /// Copies `r` into `alloc`.
     /// SAFETY: `alloc` must not own `r`. `r` must be valid for reads and live for the duration
     /// of the function.
     unsafe fn rebuild_with(alloc: &mut VecAlloc<Re>, r: Const<Re>) -> Const<Re> {
@@ -319,20 +319,11 @@ impl<'a> Regex<'a> {
         }
     }
 
-    /*
-    fn simp_alloc<'b>(tree: Const<Re>, alloc: &mut VecAlloc<Re>, r: Re) -> Const<Re> {
-        match alloc.alloc(r) {
-            Ok(ptr) => ptr.into(),
-            Err(_) => {
-                println!("failed allocation of Re node. alloc = {:?}", alloc);
-                Self::simp_rec(tree, alloc.resized(), tree)
-            }
-        }
-    }
-
-    fn simp_rec(tree: Const<Re>, alloc: &mut VecAlloc<Re>, r: Const<Re>) -> Const<Re> {
-        let try_alloc = move |alloc: &mut VecAlloc<Re>, r: Re| Self::simp_alloc(tree, alloc, r);
-
+    unsafe fn simp_rec(
+        tree: Const<Re>,
+        alloc: &mut VecAlloc<Re>,
+        r: Const<Re>,
+    ) -> Result<Const<Re>, ()> {
         // This is a little tough to understand why we only need to allocate so rarely.
         // Consider something like this:
         //
@@ -357,19 +348,19 @@ impl<'a> Regex<'a> {
         //
         // - sub nodes change during simplification
         // - new nodes are created (e.g. converting from one node type to another)
-        match unsafe { r.read() } {
+        match r.as_ref() {
             Re::Alt(r1s, r2s) => unsafe {
-                let r1 = Self::simp_rec(tree, alloc, r1s);
-                let r2 = Self::simp_rec(tree, alloc, r2s);
-                match (r1.read(), r2.read()) {
-                    (Re::Zero, _) => r2,
-                    (_, Re::Zero) => r1,
+                let r1 = Self::simp_rec(tree, alloc, *r1s)?;
+                let r2 = Self::simp_rec(tree, alloc, *r2s)?;
+                match (r1.as_ref(), r2.as_ref()) {
+                    (Re::Zero, _) => Ok(r2),
+                    (_, Re::Zero) => Ok(r1),
                     (r1a, r2a) => {
                         if r1a.eq(&r2a) {
-                            r1
+                            Ok(r1)
                         } else {
-                            if Re::const_eq(r1, r1s) && Re::const_eq(r2, r2s) {
-                                r
+                            if Re::const_eq(r1, *r1s) && Re::const_eq(r2, *r2s) {
+                                Ok(r)
                             } else {
                                 try_alloc(alloc, Re::Alt(r1, r2))
                             }
@@ -378,41 +369,47 @@ impl<'a> Regex<'a> {
                 }
             },
             Re::Seq(r1s, r2s) => unsafe {
-                let r1 = Self::simp_rec(tree, alloc, r1s);
-                let r2 = Self::simp_rec(tree, alloc, r2s);
-                match (r1.read(), r2.read()) {
-                    (Re::Zero, _) => r1,
-                    (_, Re::Zero) => r2,
-                    (Re::One, _) => r2,
-                    (_, Re::One) => r1,
+                let r1 = Self::simp_rec(tree, alloc, *r1s)?;
+                let r2 = Self::simp_rec(tree, alloc, *r2s)?;
+                match (r1.as_ref(), r2.as_ref()) {
+                    (Re::Zero, _) => Ok(r1),
+                    (_, Re::Zero) => Ok(r2),
+                    (Re::One, _) => Ok(r2),
+                    (_, Re::One) => Ok(r1),
                     _ => {
-                        if Re::const_eq(r1, r1s) && Re::const_eq(r2, r2s) {
-                            r
+                        if Re::const_eq(r1, *r1s) && Re::const_eq(r2, *r2s) {
+                            Ok(r)
                         } else {
                             try_alloc(alloc, Re::Seq(r1, r2))
                         }
                     }
                 }
             },
-            _ => r,
+            _ => Ok(r),
         }
     }
 
-    pub fn simp(&'a self) -> Regex<'a> {
+    pub fn simp<'b>(&'b self) -> Regex<'b> {
         let mut alloc = VecAlloc::new(Self::DEFAULT_CAPACITY);
-        let tree = alloc.alloc(self.tree).unwrap().into();
-        let tree = Self::simp_rec(tree, &mut alloc, tree);
+        let tree = loop {
+            match unsafe { Self::simp_rec(self.tree, &mut alloc, self.tree) } {
+                Ok(tree) => break tree,
+                Err(_) => alloc.resize(),
+            }
+        };
 
         Self {
-            tree: unsafe { tree.read() },
+            // SAFETY: `tree` is a valid pointer into `alloc` which we take ownership of.
+            tree,
             alloc,
             phantom: PhantomData::default(),
         }
     }
 
     fn ders(r: Regex<'static>, cs: &[char]) -> Regex<'static> {
-        if let Re::Zero = r.tree {
-            return Regex::new();
+        // SAFETY: dereferencing a reference to immutable buffers
+        if let Re::Zero = unsafe { r.tree.as_ref() } {
+            return r;
         }
         match cs {
             [] => r,
@@ -425,17 +422,16 @@ impl<'a> Regex<'a> {
                 let c3s = c3.simp();
                 let c4 = c3s.der(*c4);
                 let c4s = c4.simp();
-                Regex::ders(c4s.to_owned(), cs)
+                Regex::ders(c4s.clone(), cs)
             }
-            [c, cs @ ..] => Regex::ders(r.der(*c).simp().to_owned(), cs),
+            [c, cs @ ..] => Regex::ders(r.der(*c).simp().clone(), cs),
         }
     }
 
     pub fn is_match(&self, s: &str) -> bool {
-        let d = Regex::ders(self.to_owned(), &s.chars().collect::<Vec<char>>());
+        let d = Regex::ders(self.clone(), &s.chars().collect::<Vec<char>>());
         d.nullable()
     }
-    */
 }
 
 impl Regex<'static> {

@@ -143,7 +143,6 @@ impl<T> VecAlloc<T> {
     }
 
     pub fn resize(&mut self) {
-        println!("resizing {self:?}");
         self.buf = RawBuf::new(self.capacity() * 2);
         self.len = 0;
     }
