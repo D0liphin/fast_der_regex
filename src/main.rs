@@ -5,4 +5,7 @@
     slice_ptr_get
 )]
 
+mod regex;
+mod vec_alloc;
+
 fn main() {}

@@ -6,6 +6,9 @@ pub mod const_ptr;
 pub use const_ptr::*;
 pub mod build_plan;
 
+#[cfg(test)]
+mod test;
+
 #[derive(Clone, Copy)]
 pub enum Re {
     Zero,
